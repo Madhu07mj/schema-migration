@@ -35,19 +35,76 @@ mcp = FastMCP(
 )
 
 
+_SENSITIVE_HEADER_MARKERS = (
+    "authorization",
+    "credentials",
+    "api-key",
+    "api_key",
+    "token",
+    "password",
+    "secret",
+    "cookie",
+)
+
+
+def _is_sensitive_header(header_name: str) -> bool:
+    name = (header_name or "").lower()
+    return any(marker in name for marker in _SENSITIVE_HEADER_MARKERS)
+
+
+def _sanitize_header_value(header_name: str, header_value: str) -> str:
+    value = str(header_value or "")
+    if _is_sensitive_header(header_name):
+        return f"<redacted len={len(value)}>"
+    if len(value) > 120:
+        return f"{value[:120]}...<truncated len={len(value)}>"
+    return value
+
+
+def _log_headers_snapshot(operation: str, headers: dict) -> None:
+    if not headers:
+        logger.warning("mcp headers: operation=%s no_headers_found=true", operation)
+        return
+    sanitized = {k: _sanitize_header_value(k, v) for k, v in sorted(headers.items())}
+    logger.info(
+        "mcp headers: operation=%s count=%s names=%s values=%s",
+        operation,
+        len(headers),
+        sorted(headers.keys()),
+        sanitized,
+    )
+
+
 def _extract_headers_from_context(ctx: Context = None) -> dict:
     """Extract request headers from FastMCP context as lowercase keys."""
     if not ctx:
+        logger.warning("mcp header extraction: ctx_missing=true")
         return {}
     try:
         request_context = ctx.request_context
         if hasattr(request_context, "request") and request_context.request:
             request = request_context.request
-            return {name.lower(): request.headers[name] for name in request.headers.keys()}
+            headers = {name.lower(): request.headers[name] for name in request.headers.keys()}
+            logger.info(
+                "mcp header extraction: source=request_context.request.headers extracted=%s",
+                bool(headers),
+            )
+            return headers
         if hasattr(request_context, "headers") and request_context.headers:
             raw_headers = request_context.headers
-            return {str(name).lower(): str(value) for name, value in raw_headers.items()}
-    except Exception:
+            headers = {str(name).lower(): str(value) for name, value in raw_headers.items()}
+            logger.info(
+                "mcp header extraction: source=request_context.headers extracted=%s",
+                bool(headers),
+            )
+            return headers
+        logger.warning(
+            "mcp header extraction: source=none request_context_type=%s attrs=%s",
+            type(request_context).__name__,
+            [a for a in dir(request_context) if not a.startswith("_")][:20],
+        )
+    except Exception as exc:
+        logger.exception("mcp header extraction failed: %s", exc)
         return {}
     return {}
 
@@ -68,6 +125,22 @@ def _header_value(headers: dict, *names: str) -> str:
         if value:
             return str(value).strip()
     return ""
+
+
+def _header_value_with_source(headers: dict, *names: str) -> tuple[str, str]:
+    """
+    Return (matched_header_name, matched_value) for first non-empty header alias.
+    """
+    for name in names:
+        key = name.lower().strip()
+        value = headers.get(key, "")
+        if value:
+            return key, str(value).strip()
+        alt_key = key.replace("-", "_")
+        value = headers.get(alt_key, "")
+        if value:
+            return alt_key, str(value).strip()
+    return "", ""
 
 
 def _normalize_credentials_value(value: str) -> str:
@@ -146,32 +219,36 @@ def _resolve_credentials_from_headers(
     """
     Resolve credentials/sqlite_path for MCP tools from HTTP headers only.
 
-    Priority:
-    1) database-specific header: x-<db>-credentials
-    2) global header: x-db-credentials
-    3) sqlite path header: x-sqlite-path (sqlite only)
+    Universal header mode:
+    - credentials: x-db-credentials
+    - sqlite path: x-sqlite-path (sqlite only)
     """
     headers = _extract_headers_from_context(ctx)
+    _log_headers_snapshot("single", headers)
     normalized_db = db_type.lower().strip()
 
-    # Header-only mode for /unified-db/mcp tool calls.
-    db_header = f"x-{normalized_db}-credentials"
-    header_credentials = _header_value(headers, db_header, "x-db-credentials")
+    # Universal header-only mode for /unified-db/mcp tool calls.
+    matched_cred_header, raw_header_credentials = _header_value_with_source(
+        headers,
+        "x-db-credentials",
+    )
+    header_credentials = raw_header_credentials
     header_sqlite_path = ""
     header_credentials = _normalize_credentials_value(header_credentials)
 
     if not header_sqlite_path and normalized_db == "sqlite":
-        header_sqlite_path = _header_value(headers, "x-sqlite-path")
+        header_sqlite_path = _header_value(headers, "x-sqlite-path", "x-source-sqlite-path", "x-target-sqlite-path")
 
     resolved_credentials = header_credentials
     resolved_sqlite_path = (header_sqlite_path or "").strip()
 
     logger.info(
-        "mcp credential resolution: operation=single db_type=%s credentials_from_headers=%s sqlite_path_from_headers=%s header_keys=%s",
+        "mcp credential resolution: operation=single db_type=%s expected_headers=%s matched_credential_header=%s credentials_from_headers=%s sqlite_path_from_headers=%s",
         normalized_db,
+        ["x-db-credentials"],
+        matched_cred_header or "none",
         bool(header_credentials),
         bool(header_sqlite_path),
-        sorted(headers.keys()),
     )
 
     return resolved_credentials, resolved_sqlite_path
@@ -187,17 +264,20 @@ def _resolve_migration_credentials_from_headers(
     ctx: Context = None,
 ) -> tuple[str, str, str, str]:
     headers = _extract_headers_from_context(ctx)
+    _log_headers_snapshot("migrate", headers)
     source_key = source_db.lower().strip()
     target_key = target_db.lower().strip()
 
     # Header-only mode for /unified-db/mcp tool calls.
-    src_creds_header = _header_value(headers, "x-source-db-credentials")
-    tgt_creds_header = _header_value(headers, "x-target-db-credentials")
+    src_creds_header_name, src_creds_header_raw = _header_value_with_source(headers, "x-source-db-credentials")
+    tgt_creds_header_name, tgt_creds_header_raw = _header_value_with_source(headers, "x-target-db-credentials")
+    src_creds_header = src_creds_header_raw
+    tgt_creds_header = tgt_creds_header_raw
 
     if not src_creds_header:
-        src_creds_header = _header_value(headers, f"x-{source_key}-credentials", "x-db-credentials")
+        src_creds_header_name, src_creds_header = _header_value_with_source(headers, "x-db-credentials")
     if not tgt_creds_header:
-        tgt_creds_header = _header_value(headers, f"x-{target_key}-credentials", "x-db-credentials")
+        tgt_creds_header_name, tgt_creds_header = _header_value_with_source(headers, "x-db-credentials")
 
     src_sqlite_header = _header_value(headers, "x-source-sqlite-path")
     tgt_sqlite_header = _header_value(headers, "x-target-sqlite-path")
@@ -212,14 +292,17 @@ def _resolve_migration_credentials_from_headers(
     tgt_sqlite = (tgt_sqlite_header or "").strip()
 
     logger.info(
-        "mcp credential resolution: operation=migrate source_db=%s target_db=%s source_credentials_from_headers=%s target_credentials_from_headers=%s source_sqlite_path_from_headers=%s target_sqlite_path_from_headers=%s header_keys=%s",
+        "mcp credential resolution: operation=migrate source_db=%s target_db=%s source_credentials_from_headers=%s target_credentials_from_headers=%s source_matched_header=%s target_matched_header=%s source_sqlite_path_from_headers=%s target_sqlite_path_from_headers=%s source_headers_checked=%s target_headers_checked=%s",
         source_key,
         target_key,
         bool(src_creds_header),
         bool(tgt_creds_header),
+        src_creds_header_name or "none",
+        tgt_creds_header_name or "none",
         bool(src_sqlite_header),
         bool(tgt_sqlite_header),
-        sorted(headers.keys()),
+        ["x-source-db-credentials", "x-db-credentials"],
+        ["x-target-db-credentials", "x-db-credentials"],
     )
 
     return (src_creds, tgt_creds, src_sqlite, tgt_sqlite)
