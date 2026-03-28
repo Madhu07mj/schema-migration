@@ -103,18 +103,28 @@ def _resolve_credentials_from_headers(
 
     # Header-only mode for /unified-db/mcp tool calls.
     db_header = f"x-{normalized_db}-credentials"
-    resolved_credentials = headers.get(db_header, "") or headers.get("x-db-credentials", "")
-    resolved_sqlite_path = ""
-    resolved_credentials = _normalize_credentials_value(resolved_credentials)
+    header_credentials = headers.get(db_header, "") or headers.get("x-db-credentials", "")
+    header_sqlite_path = ""
+    header_credentials = _normalize_credentials_value(header_credentials)
+    arg_credentials = _normalize_credentials_value(credentials_json)
+    arg_sqlite_path = (sqlite_path or "").strip()
 
-    if not resolved_sqlite_path and normalized_db == "sqlite":
-        resolved_sqlite_path = headers.get("x-sqlite-path", "")
+    if not header_sqlite_path and normalized_db == "sqlite":
+        header_sqlite_path = headers.get("x-sqlite-path", "")
+
+    # Priority:
+    # 1) header values
+    # 2) tool argument values
+    resolved_credentials = header_credentials or arg_credentials
+    resolved_sqlite_path = header_sqlite_path or arg_sqlite_path
 
     logger.info(
-        "mcp header resolution: operation=single db_type=%s credentials_from_headers=%s sqlite_path_from_headers=%s",
+        "mcp credential resolution: operation=single db_type=%s credentials_from_headers=%s credentials_from_args=%s sqlite_path_from_headers=%s sqlite_path_from_args=%s",
         normalized_db,
-        bool(resolved_credentials),
-        bool(resolved_sqlite_path),
+        bool(header_credentials),
+        bool(arg_credentials),
+        bool(header_sqlite_path),
+        bool(arg_sqlite_path),
     )
 
     return resolved_credentials, resolved_sqlite_path
@@ -134,37 +144,46 @@ def _resolve_migration_credentials_from_headers(
     target_key = target_db.lower().strip()
 
     # Header-only mode for /unified-db/mcp tool calls.
-    src_creds = headers.get("x-source-db-credentials", "")
-    tgt_creds = headers.get("x-target-db-credentials", "")
+    src_creds_header = headers.get("x-source-db-credentials", "")
+    tgt_creds_header = headers.get("x-target-db-credentials", "")
 
-    if not src_creds:
-        src_creds = headers.get(f"x-{source_key}-credentials", "") or headers.get("x-db-credentials", "")
-    if not tgt_creds:
-        tgt_creds = headers.get(f"x-{target_key}-credentials", "") or headers.get("x-db-credentials", "")
+    if not src_creds_header:
+        src_creds_header = headers.get(f"x-{source_key}-credentials", "") or headers.get("x-db-credentials", "")
+    if not tgt_creds_header:
+        tgt_creds_header = headers.get(f"x-{target_key}-credentials", "") or headers.get("x-db-credentials", "")
 
-    src_sqlite = headers.get("x-source-sqlite-path", "")
-    tgt_sqlite = headers.get("x-target-sqlite-path", "")
-    if not src_sqlite and source_key == "sqlite":
-        src_sqlite = headers.get("x-sqlite-path", "")
-    if not tgt_sqlite and target_key == "sqlite":
-        tgt_sqlite = headers.get("x-sqlite-path", "")
+    src_sqlite_header = headers.get("x-source-sqlite-path", "")
+    tgt_sqlite_header = headers.get("x-target-sqlite-path", "")
+    if not src_sqlite_header and source_key == "sqlite":
+        src_sqlite_header = headers.get("x-sqlite-path", "")
+    if not tgt_sqlite_header and target_key == "sqlite":
+        tgt_sqlite_header = headers.get("x-sqlite-path", "")
+
+    src_creds_arg = source_credentials_json or ""
+    tgt_creds_arg = target_credentials_json or ""
+    src_sqlite_arg = source_sqlite_path or ""
+    tgt_sqlite_arg = target_sqlite_path or ""
+
+    src_creds = _normalize_credentials_value(src_creds_header) or _normalize_credentials_value(src_creds_arg)
+    tgt_creds = _normalize_credentials_value(tgt_creds_header) or _normalize_credentials_value(tgt_creds_arg)
+    src_sqlite = src_sqlite_header or src_sqlite_arg
+    tgt_sqlite = tgt_sqlite_header or tgt_sqlite_arg
 
     logger.info(
-        "mcp header resolution: operation=migrate source_db=%s target_db=%s source_credentials_from_headers=%s target_credentials_from_headers=%s source_sqlite_path_from_headers=%s target_sqlite_path_from_headers=%s",
+        "mcp credential resolution: operation=migrate source_db=%s target_db=%s source_credentials_from_headers=%s target_credentials_from_headers=%s source_credentials_from_args=%s target_credentials_from_args=%s source_sqlite_path_from_headers=%s target_sqlite_path_from_headers=%s source_sqlite_path_from_args=%s target_sqlite_path_from_args=%s",
         source_key,
         target_key,
-        bool(src_creds),
-        bool(tgt_creds),
-        bool(src_sqlite),
-        bool(tgt_sqlite),
+        bool(src_creds_header),
+        bool(tgt_creds_header),
+        bool(src_creds_arg),
+        bool(tgt_creds_arg),
+        bool(src_sqlite_header),
+        bool(tgt_sqlite_header),
+        bool(src_sqlite_arg),
+        bool(tgt_sqlite_arg),
     )
 
-    return (
-        _normalize_credentials_value(src_creds),
-        _normalize_credentials_value(tgt_creds),
-        src_sqlite,
-        tgt_sqlite,
-    )
+    return (src_creds, tgt_creds, src_sqlite, tgt_sqlite)
 
 
 @mcp.custom_route(MCP_PATH, methods=["GET"])
