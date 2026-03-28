@@ -44,9 +44,30 @@ def _extract_headers_from_context(ctx: Context = None) -> dict:
         if hasattr(request_context, "request") and request_context.request:
             request = request_context.request
             return {name.lower(): request.headers[name] for name in request.headers.keys()}
+        if hasattr(request_context, "headers") and request_context.headers:
+            raw_headers = request_context.headers
+            return {str(name).lower(): str(value) for name, value in raw_headers.items()}
     except Exception:
         return {}
     return {}
+
+
+def _header_value(headers: dict, *names: str) -> str:
+    """
+    Return first non-empty header value from accepted aliases.
+
+    Also supports underscore variants for clients that normalize names.
+    """
+    for name in names:
+        key = name.lower().strip()
+        value = headers.get(key, "")
+        if value:
+            return str(value).strip()
+        alt_key = key.replace("-", "_")
+        value = headers.get(alt_key, "")
+        if value:
+            return str(value).strip()
+    return ""
 
 
 def _normalize_credentials_value(value: str) -> str:
@@ -63,20 +84,52 @@ def _normalize_credentials_value(value: str) -> str:
     if not candidate:
         return ""
 
+    # Tolerate UI-entered separator punctuation around JSON payloads.
+    # Example accepted input:
+    #   , { "api_key": "...", "db_password": "...", "project_name": "..." }
+    candidate = candidate.strip(" \t\r\n,;")
+    if not candidate:
+        return ""
+
+    # Unwrap a single layer of quotes if the JSON was pasted as a quoted string.
+    if len(candidate) >= 2 and candidate[0] == candidate[-1] and candidate[0] in ('"', "'"):
+        candidate = candidate[1:-1].strip()
+        candidate = candidate.strip(" \t\r\n,;")
+        if not candidate:
+            return ""
+
     # If already valid JSON object text, use it directly.
     try:
         parsed = json.loads(candidate)
         if isinstance(parsed, dict):
             return json.dumps(parsed)
+        # Also accept JSON strings that contain JSON object text.
+        if isinstance(parsed, str):
+            nested = parsed.strip().strip(" \t\r\n,;")
+            try:
+                nested_obj = json.loads(nested)
+                if isinstance(nested_obj, dict):
+                    return json.dumps(nested_obj)
+            except Exception:
+                pass
     except Exception:
         pass
 
     # Try base64 decode then parse as JSON object.
     try:
-        decoded = base64.b64decode(candidate).decode("utf-8")
+        decoded = base64.b64decode(candidate, validate=False).decode("utf-8")
+        decoded = decoded.strip().strip(" \t\r\n,;")
         parsed = json.loads(decoded)
         if isinstance(parsed, dict):
             return json.dumps(parsed)
+        if isinstance(parsed, str):
+            nested = parsed.strip().strip(" \t\r\n,;")
+            try:
+                nested_obj = json.loads(nested)
+                if isinstance(nested_obj, dict):
+                    return json.dumps(nested_obj)
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -103,28 +156,22 @@ def _resolve_credentials_from_headers(
 
     # Header-only mode for /unified-db/mcp tool calls.
     db_header = f"x-{normalized_db}-credentials"
-    header_credentials = headers.get(db_header, "") or headers.get("x-db-credentials", "")
+    header_credentials = _header_value(headers, db_header, "x-db-credentials")
     header_sqlite_path = ""
     header_credentials = _normalize_credentials_value(header_credentials)
-    arg_credentials = _normalize_credentials_value(credentials_json)
-    arg_sqlite_path = (sqlite_path or "").strip()
 
     if not header_sqlite_path and normalized_db == "sqlite":
-        header_sqlite_path = headers.get("x-sqlite-path", "")
+        header_sqlite_path = _header_value(headers, "x-sqlite-path")
 
-    # Priority:
-    # 1) header values
-    # 2) tool argument values
-    resolved_credentials = header_credentials or arg_credentials
-    resolved_sqlite_path = header_sqlite_path or arg_sqlite_path
+    resolved_credentials = header_credentials
+    resolved_sqlite_path = (header_sqlite_path or "").strip()
 
     logger.info(
-        "mcp credential resolution: operation=single db_type=%s credentials_from_headers=%s credentials_from_args=%s sqlite_path_from_headers=%s sqlite_path_from_args=%s",
+        "mcp credential resolution: operation=single db_type=%s credentials_from_headers=%s sqlite_path_from_headers=%s header_keys=%s",
         normalized_db,
         bool(header_credentials),
-        bool(arg_credentials),
         bool(header_sqlite_path),
-        bool(arg_sqlite_path),
+        sorted(headers.keys()),
     )
 
     return resolved_credentials, resolved_sqlite_path
@@ -144,43 +191,35 @@ def _resolve_migration_credentials_from_headers(
     target_key = target_db.lower().strip()
 
     # Header-only mode for /unified-db/mcp tool calls.
-    src_creds_header = headers.get("x-source-db-credentials", "")
-    tgt_creds_header = headers.get("x-target-db-credentials", "")
+    src_creds_header = _header_value(headers, "x-source-db-credentials")
+    tgt_creds_header = _header_value(headers, "x-target-db-credentials")
 
     if not src_creds_header:
-        src_creds_header = headers.get(f"x-{source_key}-credentials", "") or headers.get("x-db-credentials", "")
+        src_creds_header = _header_value(headers, f"x-{source_key}-credentials", "x-db-credentials")
     if not tgt_creds_header:
-        tgt_creds_header = headers.get(f"x-{target_key}-credentials", "") or headers.get("x-db-credentials", "")
+        tgt_creds_header = _header_value(headers, f"x-{target_key}-credentials", "x-db-credentials")
 
-    src_sqlite_header = headers.get("x-source-sqlite-path", "")
-    tgt_sqlite_header = headers.get("x-target-sqlite-path", "")
+    src_sqlite_header = _header_value(headers, "x-source-sqlite-path")
+    tgt_sqlite_header = _header_value(headers, "x-target-sqlite-path")
     if not src_sqlite_header and source_key == "sqlite":
-        src_sqlite_header = headers.get("x-sqlite-path", "")
+        src_sqlite_header = _header_value(headers, "x-sqlite-path")
     if not tgt_sqlite_header and target_key == "sqlite":
-        tgt_sqlite_header = headers.get("x-sqlite-path", "")
+        tgt_sqlite_header = _header_value(headers, "x-sqlite-path")
 
-    src_creds_arg = source_credentials_json or ""
-    tgt_creds_arg = target_credentials_json or ""
-    src_sqlite_arg = source_sqlite_path or ""
-    tgt_sqlite_arg = target_sqlite_path or ""
-
-    src_creds = _normalize_credentials_value(src_creds_header) or _normalize_credentials_value(src_creds_arg)
-    tgt_creds = _normalize_credentials_value(tgt_creds_header) or _normalize_credentials_value(tgt_creds_arg)
-    src_sqlite = src_sqlite_header or src_sqlite_arg
-    tgt_sqlite = tgt_sqlite_header or tgt_sqlite_arg
+    src_creds = _normalize_credentials_value(src_creds_header)
+    tgt_creds = _normalize_credentials_value(tgt_creds_header)
+    src_sqlite = (src_sqlite_header or "").strip()
+    tgt_sqlite = (tgt_sqlite_header or "").strip()
 
     logger.info(
-        "mcp credential resolution: operation=migrate source_db=%s target_db=%s source_credentials_from_headers=%s target_credentials_from_headers=%s source_credentials_from_args=%s target_credentials_from_args=%s source_sqlite_path_from_headers=%s target_sqlite_path_from_headers=%s source_sqlite_path_from_args=%s target_sqlite_path_from_args=%s",
+        "mcp credential resolution: operation=migrate source_db=%s target_db=%s source_credentials_from_headers=%s target_credentials_from_headers=%s source_sqlite_path_from_headers=%s target_sqlite_path_from_headers=%s header_keys=%s",
         source_key,
         target_key,
         bool(src_creds_header),
         bool(tgt_creds_header),
-        bool(src_creds_arg),
-        bool(tgt_creds_arg),
         bool(src_sqlite_header),
         bool(tgt_sqlite_header),
-        bool(src_sqlite_arg),
-        bool(tgt_sqlite_arg),
+        sorted(headers.keys()),
     )
 
     return (src_creds, tgt_creds, src_sqlite, tgt_sqlite)
