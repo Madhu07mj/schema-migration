@@ -231,6 +231,9 @@ def _resolve_credentials_from_headers(
     matched_cred_header, raw_header_credentials = _header_value_with_source(
         headers,
         "x-db-credentials",
+        # Compatibility fallback when callers only send migration-style headers.
+        "x-source-db-credentials",
+        "x-target-db-credentials",
     )
     header_credentials = raw_header_credentials
     header_sqlite_path = ""
@@ -245,7 +248,7 @@ def _resolve_credentials_from_headers(
     logger.info(
         "mcp credential resolution: operation=single db_type=%s expected_headers=%s matched_credential_header=%s credentials_from_headers=%s sqlite_path_from_headers=%s",
         normalized_db,
-        ["x-db-credentials"],
+        ["x-db-credentials", "x-source-db-credentials", "x-target-db-credentials"],
         matched_cred_header or "none",
         bool(header_credentials),
         bool(header_sqlite_path),
