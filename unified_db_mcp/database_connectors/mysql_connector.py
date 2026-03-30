@@ -11,21 +11,59 @@ logger = logging.getLogger(__name__)
 
 class MySQLConnector(DatabaseConnector):
     """MySQL connector"""
-    
+
+    @staticmethod
+    def _is_local_host(host: Any) -> bool:
+        value = str(host or "").strip().lower()
+        return value in {"", "localhost", "127.0.0.1", "::1"}
+
     def connect(self, credentials: Dict[str, Any]):
         """Connect to MySQL"""
-        # Ensure default values for MySQL connection options
+        host = credentials.get("host")
+        port = credentials.get("port", 3306)
+        database = credentials.get("database")
+        user = credentials.get("user")
+        password = credentials.get("password")
+
+        # Prefer secure defaults for remote DB hosts.
+        # Localhost defaults remain non-SSL to preserve local development ergonomics.
+        ssl_disabled = credentials.get("ssl_disabled")
+        if ssl_disabled is None:
+            ssl_disabled = self._is_local_host(host)
+
         conn_params = {
-            'host': credentials.get('host'),
-            'port': credentials.get('port', 3306),
-            'database': credentials.get('database'),
-            'user': credentials.get('user'),
-            'password': credentials.get('password'),
-            'use_pure': credentials.get('use_pure', True),  # Default to True
-            'ssl_disabled': credentials.get('ssl_disabled', True)  # Default to True
+            "host": host,
+            "port": port,
+            "database": database,
+            "user": user,
+            "password": password,
+            "use_pure": credentials.get("use_pure", True),
+            "ssl_disabled": bool(ssl_disabled),
         }
-        
-        logger.info(f"Connecting to MySQL: {conn_params['user']}@{conn_params['host']}:{conn_params['port']}/{conn_params['database']}")
+
+        optional_fields = (
+            "ssl_ca",
+            "ssl_cert",
+            "ssl_key",
+            "ssl_verify_cert",
+            "auth_plugin",
+            "connection_timeout",
+            "charset",
+            "collation",
+            "autocommit",
+        )
+        for field in optional_fields:
+            if field in credentials and credentials.get(field) is not None:
+                conn_params[field] = credentials.get(field)
+
+        logger.info(
+            "Connecting to MySQL: %s@%s:%s/%s ssl_disabled=%s",
+            conn_params["user"],
+            conn_params["host"],
+            conn_params["port"],
+            conn_params["database"],
+            conn_params["ssl_disabled"],
+        )
         return mysql.connector.connect(**conn_params)
     
     def extract_schema(self, connection, credentials: Dict[str, Any] = None) -> SchemaInfo:
