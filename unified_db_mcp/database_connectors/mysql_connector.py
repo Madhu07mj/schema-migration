@@ -17,10 +17,34 @@ class MySQLConnector(DatabaseConnector):
         value = str(host or "").strip().lower()
         return value in {"", "localhost", "127.0.0.1", "::1"}
 
+    @staticmethod
+    def _coerce_bool(value: Any, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"true", "1", "yes", "y", "on"}:
+            return True
+        if text in {"false", "0", "no", "n", "off"}:
+            return False
+        return default
+
+    @staticmethod
+    def _coerce_int(value: Any, default: int) -> int:
+        if value is None:
+            return default
+        try:
+            return int(str(value).strip())
+        except Exception:
+            return default
+
     def connect(self, credentials: Dict[str, Any]):
         """Connect to MySQL"""
         host = credentials.get("host")
-        port = credentials.get("port", 3306)
+        port = self._coerce_int(credentials.get("port"), 3306)
         database = credentials.get("database")
         user = credentials.get("user")
         password = credentials.get("password")
@@ -30,6 +54,7 @@ class MySQLConnector(DatabaseConnector):
         ssl_disabled = credentials.get("ssl_disabled")
         if ssl_disabled is None:
             ssl_disabled = self._is_local_host(host)
+        ssl_disabled = self._coerce_bool(ssl_disabled, default=self._is_local_host(host))
 
         conn_params = {
             "host": host,
@@ -38,7 +63,7 @@ class MySQLConnector(DatabaseConnector):
             "user": user,
             "password": password,
             "use_pure": credentials.get("use_pure", True),
-            "ssl_disabled": bool(ssl_disabled),
+            "ssl_disabled": ssl_disabled,
         }
 
         optional_fields = (
