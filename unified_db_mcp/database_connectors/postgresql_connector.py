@@ -30,7 +30,7 @@ class PostgreSQLConnector(DatabaseConnector):
         optional_fields = ("sslmode", "sslcert", "sslkey", "sslrootcert", "connect_timeout", "options")
         for field in optional_fields:
             if field in credentials and credentials.get(field) is not None:
-                conn_params[field] = credentials.get(field)
+                conn_params[field] = credentials.get(field)  
 
         conn = psycopg2.connect(**conn_params)
         return conn
