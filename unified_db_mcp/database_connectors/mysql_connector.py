@@ -48,6 +48,9 @@ class MySQLConnector(DatabaseConnector):
         database = credentials.get("database")
         user = credentials.get("user")
         password = credentials.get("password")
+        missing = [name for name, value in (("host", host), ("database", database), ("user", user), ("password", password)) if not value]
+        if missing:
+            raise ValueError(f"MySQL credentials missing required fields: {', '.join(missing)}")
 
         # Prefer secure defaults for remote DB hosts.
         # Localhost defaults remain non-SSL to preserve local development ergonomics.
@@ -64,6 +67,7 @@ class MySQLConnector(DatabaseConnector):
             "password": password,
             "use_pure": credentials.get("use_pure", True),
             "ssl_disabled": ssl_disabled,
+            "connection_timeout": self._coerce_int(credentials.get("connection_timeout"), 60),
         }
 
         optional_fields = (
