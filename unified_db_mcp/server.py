@@ -268,31 +268,24 @@ def _resolve_credentials_from_headers(
 
     # Choose credential source:
     # 1) x-db-credentials
-    # 2) DB-aware pick between source/target fallback headers
+    # 2) Fallback to exactly one source/target header for compatibility.
+    # If both are present for a single-db tool request, fail fast with a clear error.
     header_credentials = universal_norm
     selection_reason = "x-db-credentials"
     if not header_credentials:
-        src_obj = _try_parse_credentials_json(src_norm)
-        tgt_obj = _try_parse_credentials_json(tgt_norm)
-        src_matches = _credentials_match_db_type(normalized_db, src_obj)
-        tgt_matches = _credentials_match_db_type(normalized_db, tgt_obj)
-
-        if src_matches and not tgt_matches:
+        if src_norm and tgt_norm:
+            raise ValueError(
+                "Single-db tools require x-db-credentials. "
+                "Both x-source-db-credentials and x-target-db-credentials were provided."
+            )
+        if src_norm:
             matched_cred_header = src_header_name or "x-source-db-credentials"
             header_credentials = src_norm
-            selection_reason = "db-type-matched-source"
-        elif tgt_matches and not src_matches:
-            matched_cred_header = tgt_header_name or "x-target-db-credentials"
-            header_credentials = tgt_norm
-            selection_reason = "db-type-matched-target"
-        elif src_norm:
-            matched_cred_header = src_header_name or "x-source-db-credentials"
-            header_credentials = src_norm
-            selection_reason = "fallback-source-first"
+            selection_reason = "fallback-source-only"
         elif tgt_norm:
             matched_cred_header = tgt_header_name or "x-target-db-credentials"
             header_credentials = tgt_norm
-            selection_reason = "fallback-target"
+            selection_reason = "fallback-target-only"
 
     header_sqlite_path = ""
 
