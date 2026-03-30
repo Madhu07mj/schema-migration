@@ -229,11 +229,56 @@ def _credentials_match_db_type(db_type: str, credentials: dict) -> bool:
     if not credentials:
         return False
     keys = {str(k).lower() for k in credentials.keys()}
+    conn_str = str(credentials.get("connection_string", "") or "").lower().strip()
+    port_value = credentials.get("port")
+    try:
+        port = int(str(port_value).strip()) if port_value is not None else None
+    except Exception:
+        port = None
 
     if key == "supabase":
-        return ("api_key" in keys) or ("key" in keys) or ("connection_string" in keys)
-    if key in {"mysql", "mariadb", "postgresql", "mongodb", "sqlserver", "cassandra"}:
-        return ("host" in keys) or ("connection_string" in keys) or ("user" in keys) or ("username" in keys)
+        return (
+            ("api_key" in keys)
+            or ("key" in keys)
+            or ("project_name" in keys)
+            or ("db_password" in keys)
+            or ("supabase.co" in conn_str)
+        )
+    if key == "postgresql":
+        return (
+            ("sslmode" in keys)
+            or ("options" in keys)
+            or conn_str.startswith("postgresql://")
+            or conn_str.startswith("postgres://")
+            or (port == 5432)
+        )
+    if key in {"mysql", "mariadb"}:
+        return (
+            ("ssl_disabled" in keys)
+            or ("use_pure" in keys)
+            or ("auth_plugin" in keys)
+            or conn_str.startswith("mysql://")
+            or (port in {3306, 3307, 33060, 26561})
+        )
+    if key == "mongodb":
+        return (
+            conn_str.startswith("mongodb://")
+            or conn_str.startswith("mongodb+srv://")
+            or ("authsource" in keys)
+            or ("replicaset" in keys)
+            or (port == 27017)
+        )
+    if key == "sqlserver":
+        return (
+            ("instance" in keys)
+            or ("driver" in keys)
+            or ("trusted_connection" in keys)
+            or ("odbc" in conn_str)
+            or ("driver=" in conn_str)
+            or (port == 1433)
+        )
+    if key == "cassandra":
+        return ("keyspace" in keys) or ("datacenter" in keys) or (port == 9042)
     if key == "sqlite":
         return "database_path" in keys
     return bool(keys)
@@ -268,17 +313,30 @@ def _resolve_credentials_from_headers(
 
     # Choose credential source:
     # 1) x-db-credentials
-    # 2) Fallback to exactly one source/target header for compatibility.
-    # If both are present for a single-db tool request, fail fast with a clear error.
+    # 2) If both source/target are present, use db-type-aware selection.
+    # 3) If selection is ambiguous, fail fast with a clear error.
     header_credentials = universal_norm
     selection_reason = "x-db-credentials"
     if not header_credentials:
         if src_norm and tgt_norm:
-            raise ValueError(
-                "Single-db tools require x-db-credentials. "
-                "Both x-source-db-credentials and x-target-db-credentials were provided."
-            )
-        if src_norm:
+            src_obj = _try_parse_credentials_json(src_norm)
+            tgt_obj = _try_parse_credentials_json(tgt_norm)
+            src_matches = _credentials_match_db_type(normalized_db, src_obj)
+            tgt_matches = _credentials_match_db_type(normalized_db, tgt_obj)
+            if src_matches and not tgt_matches:
+                matched_cred_header = src_header_name or "x-source-db-credentials"
+                header_credentials = src_norm
+                selection_reason = "db-type-matched-source"
+            elif tgt_matches and not src_matches:
+                matched_cred_header = tgt_header_name or "x-target-db-credentials"
+                header_credentials = tgt_norm
+                selection_reason = "db-type-matched-target"
+            else:
+                raise ValueError(
+                    "Single-db credential selection is ambiguous. "
+                    "Provide x-db-credentials for single-db tools."
+                )
+        elif src_norm:
             matched_cred_header = src_header_name or "x-source-db-credentials"
             header_credentials = src_norm
             selection_reason = "fallback-source-only"
